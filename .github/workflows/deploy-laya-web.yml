@@ -1,0 +1,116 @@
+name: Build private LayaAir game and deploy Pages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pohuaiwang-official-pages
+  cancel-in-progress: false
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Check out public deploy configuration
+        uses: actions/checkout@v4
+
+      - name: Check required private source read credential
+        shell: bash
+        env:
+          SOURCE_READ_TOKEN: ${{ secrets.LAYA_SOURCE_READ_TOKEN }}
+        run: |
+          if [[ -z "$SOURCE_READ_TOKEN" ]]; then
+            echo "Missing LAYA_SOURCE_READ_TOKEN repository secret; stop without publishing."
+            exit 1
+          fi
+
+      - name: Check out private game source with read-only token
+        uses: actions/checkout@v4
+        with:
+          repository: BaiMaGod/pohuaiwang
+          ref: main
+          token: ${{ secrets.LAYA_SOURCE_READ_TOKEN }}
+          path: private-game
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install TypeScript and build helpers
+        working-directory: private-game
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck all prototype TypeScript
+        working-directory: private-game
+        run: npm run typecheck
+
+      - name: Execute game rule tests
+        working-directory: private-game
+        run: npm test
+
+      - name: Install official LayaAir CLI 3.4.0
+        shell: bash
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/layabox/layaair-cli/master/install.sh -o /tmp/pohuai-laya-install.sh
+          bash /tmp/pohuai-laya-install.sh
+          echo "$HOME/.layaair" >> "$GITHUB_PATH"
+          "$HOME/.layaair/layaair" install 3.4.0
+          "$HOME/.layaair/layaair" list
+
+      - name: Build genuine LayaAir Web output
+        working-directory: private-game
+        run: npm run release:build
+
+      - name: Install real Chromium automation
+        run: |
+          python3 -m pip install playwright==1.55.0
+          python3 -m playwright install --with-deps chromium
+
+      - name: Play the real game in two mobile viewports
+        working-directory: private-game
+        run: npm run release:smoke
+
+      - name: Verify private game's complete accepted build
+        working-directory: private-game
+        run: npm run release:verify
+
+      - name: Independently validate build evidence and hashes
+        run: node scripts/validate-web.mjs private-game/.release-out/web
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload ONLY verified compiled Web output
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: private-game/.release-out/web
+
+      - name: Deploy GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: Verify live page serves the actual game scripts
+        env:
+          DEPLOY_URL: ${{ steps.deploy.outputs.page_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5 6; do
+            if curl -fsSL --max-time 25 "$DEPLOY_URL" -o /tmp/pohuai-live-index.html; then break; fi
+            sleep 5
+          done
+          grep -Fq 'js/pohuai-game.js' /tmp/pohuai-live-index.html
+          curl -fsSL --max-time 30 "$DEPLOY_URL/js/pohuai-game.js" -o /tmp/pohuai-live-game.js
+          test -s /tmp/pohuai-live-game.js
+          echo "LIVE_POHUAI_PAGES_LOAD_PASS $DEPLOY_URL"
